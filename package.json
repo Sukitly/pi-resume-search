@@ -1,0 +1,53 @@
+{
+  "name": "pi-session-search",
+  "version": "0.1.0",
+  "description": "Search user and assistant messages in current-project pi sessions.",
+  "type": "module",
+  "license": "MIT",
+  "author": "Sukitly",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Sukitly/pi-session-search.git"
+  },
+  "homepage": "https://github.com/Sukitly/pi-session-search#readme",
+  "bugs": {
+    "url": "https://github.com/Sukitly/pi-session-search/issues"
+  },
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "pi",
+    "session",
+    "search"
+  ],
+  "files": [
+    "extensions",
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "pi": {
+    "extensions": [
+      "./extensions/pi-session-search.ts"
+    ]
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "lint": "bun run typecheck && biome check --error-on-warnings .",
+    "format": "biome check --write ."
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.5.13",
+    "@earendil-works/pi-coding-agent": "0.85.1",
+    "@types/node": "22.20.2",
+    "typescript": "7.0.2",
+    "vitest": "5.0.0"
+  }
+}
