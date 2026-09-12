@@ -3,16 +3,18 @@
   "configVersion": 1,
   "workspaces": {
     "": {
-      "name": "pi-session-search",
+      "name": "pi-resume-search",
       "devDependencies": {
         "@biomejs/biome": "2.5.13",
         "@earendil-works/pi-coding-agent": "0.85.1",
+        "@earendil-works/pi-tui": "0.85.1",
         "@types/node": "22.20.2",
         "typescript": "7.0.2",
         "vitest": "5.0.0",
       },
       "peerDependencies": {
         "@earendil-works/pi-coding-agent": "*",
+        "@earendil-works/pi-tui": "*",
       },
     },
   },
