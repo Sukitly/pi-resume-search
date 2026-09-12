@@ -1,22 +1,23 @@
 {
-  "name": "pi-session-search",
+  "name": "pi-resume-search",
   "version": "0.1.0",
-  "description": "Search user and assistant messages in current-project pi sessions.",
+  "description": "A /resume picker for pi that shows which messages matched your search, backed by ripgrep.",
   "type": "module",
   "license": "MIT",
   "author": "Sukitly",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/Sukitly/pi-session-search.git"
+    "url": "git+https://github.com/Sukitly/pi-resume-search.git"
   },
-  "homepage": "https://github.com/Sukitly/pi-session-search#readme",
+  "homepage": "https://github.com/Sukitly/pi-resume-search#readme",
   "bugs": {
-    "url": "https://github.com/Sukitly/pi-session-search/issues"
+    "url": "https://github.com/Sukitly/pi-resume-search/issues"
   },
   "keywords": [
     "pi-package",
     "pi-extension",
     "pi",
+    "resume",
     "session",
     "search"
   ],
@@ -31,7 +32,7 @@
   },
   "pi": {
     "extensions": [
-      "./extensions/pi-session-search.ts"
+      "./extensions/pi-resume-search.ts"
     ]
   },
   "scripts": {
@@ -41,11 +42,13 @@
     "format": "biome check --write ."
   },
   "peerDependencies": {
-    "@earendil-works/pi-coding-agent": "*"
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*"
   },
   "devDependencies": {
     "@biomejs/biome": "2.5.13",
     "@earendil-works/pi-coding-agent": "0.85.1",
+    "@earendil-works/pi-tui": "0.85.1",
     "@types/node": "22.20.2",
     "typescript": "7.0.2",
     "vitest": "5.0.0"
