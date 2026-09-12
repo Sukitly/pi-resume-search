@@ -1,7 +1,7 @@
 {
   "name": "pi-resume-search",
   "version": "0.1.0",
-  "description": "Resume pi sessions by searching their user and assistant messages, not just the first one.",
+  "description": "A /resume picker for pi that shows which messages matched your search, backed by ripgrep.",
   "type": "module",
   "license": "MIT",
   "author": "Sukitly",

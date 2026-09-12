@@ -41,8 +41,11 @@ export async function listSessionFiles(
   let names: string[];
   try {
     names = await readdir(sessionDir);
-  } catch {
-    return [];
+  } catch (error) {
+    // A missing directory means the project has no sessions yet. Permission
+    // and I/O errors are real failures and must reach the user.
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+    throw error;
   }
   const files: SessionFile[] = [];
   await Promise.all(
@@ -68,25 +71,25 @@ const TITLE_CHARS = 300;
 const STRING_PREFIX = `"(?:[^"\\\\]|\\\\.){0,${TITLE_CHARS}}`;
 
 /**
- * Selects the header line, session_info lines, and the leading text of each
- * user message. Used with `--only-matching --replace` so ripgrep prints only
- * the capture groups: whole lines for the first alternative, and for user
- * messages the entry prefix plus a bounded string body. Leading image blocks
- * are skipped by the pattern and never printed, which matters because pasted
- * screenshots are megabytes of base64.
+ * Selects three things in one pass: the header line, session_info lines, and
+ * for every user or assistant message its entry timestamp plus, for user
+ * messages only, a bounded prefix of the first text it carries.
+ *
+ * Used with `--only-matching --replace`, so ripgrep prints only the capture
+ * groups: whole lines for the first alternative, and `<timestamp>\t<body>`
+ * for message lines. Leading image blocks are skipped by the pattern and
+ * never printed, which matters because pasted screenshots are megabytes of
+ * base64.
  */
 const METADATA_PATTERN =
   '(^\\{"type":"session(?:_info)?".*)' +
-  '|(^\\{"type":"message".{0,200}"message":\\{"role":"user","content":)' +
-  `(?:(${STRING_PREFIX})` +
-  `|\\[(?:\\{"type":"image",[^}]*\\},?)*\\{"type":"text","text":(${STRING_PREFIX}))`;
+  '|^\\{"type":"message".{0,200}"timestamp":"([^"]*)","message":\\{"role":' +
+  '(?:"assistant"' +
+  `|"user"(?:,"content":(?:(${STRING_PREFIX})` +
+  `|\\[(?:\\{"type":"image",[^}]*\\},?)*\\{"type":"text","text":(${STRING_PREFIX})))?)`;
 // ripgrep expands ${N} groups; an unmatched group expands to nothing.
-const METADATA_REPLACEMENT = ["1", "2", "3", "4"]
-  .map((group) => `$\{${group}}`)
-  .join("");
+const METADATA_REPLACEMENT = `$\{1}$\{2}\t$\{3}$\{4}`;
 
-const USER_CONTENT_MARKER = '"role":"user","content":';
-const TEXT_BLOCK_MARKER = '{"type":"text","text":"';
 const HEADER_PREFIX = '{"type":"session"';
 const SESSION_INFO_PREFIX = '{"type":"session_info"';
 
@@ -128,18 +131,21 @@ export function decodeJsonStringPrefix(body: string): string {
   }
 }
 
-/** Title text from a bounded user-line prefix produced by METADATA_PATTERN. */
-export function titleFromUserPrefix(prefix: string): string | undefined {
-  const marker = prefix.indexOf(USER_CONTENT_MARKER);
-  if (marker === -1) return undefined;
-  const content = prefix.slice(marker + USER_CONTENT_MARKER.length);
-  if (content.startsWith('"')) return decodeJsonStringPrefix(content.slice(1));
-  if (!content.startsWith("[")) return undefined;
-  const block = content.indexOf(TEXT_BLOCK_MARKER);
-  if (block === -1) return undefined;
-  return decodeJsonStringPrefix(
-    content.slice(block + TEXT_BLOCK_MARKER.length),
-  );
+/**
+ * Splits a `<timestamp>\t<body>` record emitted by METADATA_PATTERN. The
+ * body is a JSON string starting at its opening quote, and is empty for
+ * assistant messages and for user messages with no text.
+ */
+export function parseActivityRecord(
+  record: string,
+): { timestamp: number; title?: string } | undefined {
+  const tab = record.indexOf("\t");
+  if (tab === -1) return undefined;
+  const timestamp = new Date(record.slice(0, tab)).getTime();
+  if (Number.isNaN(timestamp)) return undefined;
+  const body = record.slice(tab + 1);
+  if (!body.startsWith('"')) return { timestamp };
+  return { timestamp, title: decodeJsonStringPrefix(body.slice(1)) };
 }
 
 function collapse(text: string): string {
@@ -149,8 +155,10 @@ function collapse(text: string): string {
 interface MetaDraft {
   id?: string;
   cwd: string;
+  created?: number;
   name?: string;
   title?: string;
+  lastActivity?: number;
 }
 
 /** Folds metadata records for one file, in line order. */
@@ -167,6 +175,11 @@ export function buildSessionMeta(
       if (typeof entry.id !== "string") return undefined;
       draft.id = entry.id;
       draft.cwd = typeof entry.cwd === "string" ? entry.cwd : "";
+      const created =
+        typeof entry.timestamp === "string"
+          ? new Date(entry.timestamp).getTime()
+          : Number.NaN;
+      if (!Number.isNaN(created)) draft.created = created;
       continue;
     }
     if (line.startsWith(SESSION_INFO_PREFIX)) {
@@ -176,9 +189,12 @@ export function buildSessionMeta(
       draft.name = name || undefined;
       continue;
     }
-    if (draft.title === undefined && !line.startsWith(HEADER_PREFIX)) {
-      const title = titleFromUserPrefix(line);
-      if (title !== undefined) draft.title = collapse(title);
+    if (line.startsWith(HEADER_PREFIX)) continue;
+    const activity = parseActivityRecord(line);
+    if (!activity) continue;
+    draft.lastActivity = Math.max(draft.lastActivity ?? 0, activity.timestamp);
+    if (draft.title === undefined && activity.title !== undefined) {
+      draft.title = collapse(activity.title);
     }
   }
   if (draft.id === undefined) return undefined;
@@ -188,14 +204,15 @@ export function buildSessionMeta(
     cwd: draft.cwd,
     name: draft.name,
     title: draft.title || "(no messages)",
-    modified: file.mtimeMs,
+    modified: draft.lastActivity ?? draft.created ?? file.mtimeMs,
   };
 }
 
 /**
- * Lists sessions in scope with one ripgrep pass over the directory. Output
- * is bounded to headers, names, and title fragments, so nothing else is
- * read into memory. Most recently modified first.
+ * Lists sessions in scope with one ripgrep pass over the directory. Output is
+ * bounded to headers, names, entry timestamps, and title fragments, so no
+ * message body is read into memory. Most recent activity first, matching how
+ * pi orders /resume.
  */
 export async function listSessions(
   scope: SessionScope,

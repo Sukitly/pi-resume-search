@@ -83,8 +83,12 @@ export async function runRipgrep(
   options: RipgrepOptions = {},
 ): Promise<string> {
   if (options.command) return spawnRipgrep(options.command, args, options);
-  const candidates = resolvedCommand ? [resolvedCommand] : ripgrepCandidates();
-  let lastError: RipgrepUnavailableError | undefined;
+  // The previously working executable is tried first, but never exclusively:
+  // it may have been uninstalled while pi was running.
+  const rest = ripgrepCandidates().filter(
+    (candidate) => candidate !== resolvedCommand,
+  );
+  const candidates = resolvedCommand ? [resolvedCommand, ...rest] : rest;
   for (const candidate of candidates) {
     try {
       const output = await spawnRipgrep(candidate, args, options);
@@ -92,10 +96,14 @@ export async function runRipgrep(
       return output;
     } catch (error) {
       if (!(error instanceof RipgrepUnavailableError)) throw error;
-      lastError = error;
     }
   }
-  throw lastError ?? new RipgrepUnavailableError("ripgrep (rg) not found");
+  resolvedCommand = undefined;
+  // Report the whole candidate set. Naming only the last one would point at
+  // pi's private bin directory, which the user never chose.
+  throw new RipgrepUnavailableError(
+    `ripgrep (rg) not found. Looked for: ${candidates.join(", ")}`,
+  );
 }
 
 function spawnRipgrep(

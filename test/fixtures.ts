@@ -4,11 +4,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { SessionDocument, SessionMeta } from "../src/types";
 
-export function header(
-  id: string,
-  cwd: string,
-  timestamp = "2026-01-01T00:00:00.000Z",
-): string {
+export const T0 = "2026-01-01T00:00:00.000Z";
+
+export function header(id: string, cwd: string, timestamp = T0): string {
   return JSON.stringify({ type: "session", version: 3, id, timestamp, cwd });
 }
 
@@ -19,61 +17,92 @@ function nextId(): string {
   return counter.toString(16).padStart(8, "0");
 }
 
-function entry(message: Record<string, unknown>): string {
+function entry(message: Record<string, unknown>, at: string): string {
   return JSON.stringify({
     type: "message",
     id: nextId(),
     parentId: null,
-    timestamp: "2026-01-01T00:00:01.000Z",
+    timestamp: at,
     message,
   });
 }
 
-export function userLine(content: unknown): string {
-  return entry({ role: "user", content, timestamp: 1_700_000_000_000 });
+export function userLine(content: unknown, at = T0): string {
+  return entry({ role: "user", content, timestamp: Date.parse(at) }, at);
 }
 
 export function assistantLine(
   text: string,
   extraBlocks: unknown[] = [],
+  at = T0,
 ): string {
-  return entry({
-    role: "assistant",
-    content: [...extraBlocks, { type: "text", text }],
-    api: "anthropic-messages",
-    provider: "anthropic",
-    model: "test",
-    usage: {},
-    stopReason: "stop",
-    timestamp: 1_700_000_000_000,
-  });
+  return entry(
+    {
+      role: "assistant",
+      content: [...extraBlocks, { type: "text", text }],
+      api: "anthropic-messages",
+      provider: "anthropic",
+      model: "test",
+      usage: {},
+      stopReason: "stop",
+      timestamp: Date.parse(at),
+    },
+    at,
+  );
 }
 
-export function toolCallOnlyLine(argumentsText: string): string {
-  return entry({
-    role: "assistant",
-    content: [
-      {
-        type: "toolCall",
-        id: "call_1",
-        name: "bash",
-        arguments: { command: argumentsText },
-      },
-    ],
-    stopReason: "toolUse",
-    timestamp: 1_700_000_000_000,
-  });
+/** Assistant turn whose only mention of anything is hidden from search. */
+export function hiddenMentionLine(text: string, at = T0): string {
+  return entry(
+    {
+      role: "assistant",
+      content: [
+        { type: "thinking", thinking: `thinking about ${text}` },
+        {
+          type: "toolCall",
+          id: "call_1",
+          name: "read",
+          arguments: { path: text },
+        },
+      ],
+      stopReason: "toolUse",
+      timestamp: Date.parse(at),
+    },
+    at,
+  );
 }
 
-export function toolResultLine(text: string): string {
-  return entry({
-    role: "toolResult",
-    toolCallId: "call_1",
-    toolName: "bash",
-    content: [{ type: "text", text }],
-    isError: false,
-    timestamp: 1_700_000_000_000,
-  });
+export function toolCallOnlyLine(argumentsText: string, at = T0): string {
+  return entry(
+    {
+      role: "assistant",
+      content: [
+        {
+          type: "toolCall",
+          id: "call_1",
+          name: "bash",
+          arguments: { command: argumentsText },
+        },
+      ],
+      stopReason: "toolUse",
+      timestamp: Date.parse(at),
+    },
+    at,
+  );
+}
+
+export function toolResultLine(text: string, at = T0): string {
+  return entry(
+    {
+      role: "toolResult",
+      toolCallId: "call_1",
+      toolName: "bash",
+      content: [{ type: "text", text }],
+      isError: false,
+      timestamp: Date.parse(at),
+    },
+    at,
+  );
 }
 
 export function sessionInfoLine(name: string | undefined): string {
@@ -81,7 +110,7 @@ export function sessionInfoLine(name: string | undefined): string {
     type: "session_info",
     id: nextId(),
     parentId: null,
-    timestamp: "2026-01-01T00:00:00.000Z",
+    timestamp: T0,
     name,
   });
 }
@@ -97,7 +126,7 @@ export interface TempDir {
 }
 
 export async function makeTempDir(): Promise<TempDir> {
-  const path = await mkdtemp(join(tmpdir(), "pi-session-search-"));
+  const path = await mkdtemp(join(tmpdir(), "pi-resume-search-"));
   return {
     path,
     async write(name, content, mtimeMs) {
@@ -126,7 +155,7 @@ export function makeSession(
     id: overrides.path,
     cwd: "/project",
     title: "(no messages)",
-    modified: 1_700_000_000_000,
+    modified: Date.parse(T0),
     ...overrides,
   };
 }

@@ -5,7 +5,7 @@ import type {
 import { searchSessions } from "./search";
 import { defaultSessionDir, listSessions } from "./sessions";
 import type { SessionScope } from "./types";
-import { SessionSearchView } from "./ui";
+import { ResumeSearchView } from "./ui";
 
 /** Short for "resume with search": the same flow as /resume, plus content search. */
 export const COMMAND_NAME = "rs";
@@ -39,7 +39,7 @@ export function registerResumeSearch(pi: ExtensionAPI): void {
       const selected = await ctx.ui.custom<string | undefined>(
         (tui, theme, keybindings, done) => {
           const listing = new AbortController();
-          const view = new SessionSearchView({
+          const view = new ResumeSearchView({
             theme,
             keybindings,
             search: (query, sessions, signal) =>
@@ -60,9 +60,7 @@ export function registerResumeSearch(pi: ExtensionAPI): void {
             .then((sessions) => view.setSessions(sessions))
             .catch((error: unknown) => {
               if (listing.signal.aborted) return;
-              const message =
-                error instanceof Error ? error.message : String(error);
-              view.setLoadError(`Failed to list sessions: ${message}`);
+              view.setLoadError(error);
             });
           return view;
         },

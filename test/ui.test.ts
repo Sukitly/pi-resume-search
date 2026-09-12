@@ -6,8 +6,9 @@ import {
 } from "@earendil-works/pi-tui";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { RipgrepError, RipgrepUnavailableError } from "../src/ripgrep";
+import type { SearchResult } from "../src/search";
 import type { SessionDocument, SessionMatch, SessionMeta } from "../src/types";
-import { formatAge, type SearchFn, SessionSearchView } from "../src/ui";
+import { formatAge, ResumeSearchView, type SearchFn } from "../src/ui";
 import { makeDocument, makeSession } from "./fixtures";
 
 const plainTheme = {
@@ -63,7 +64,7 @@ function sessions(): SessionMeta[] {
 }
 
 /** In-memory literal search standing in for the ripgrep-backed one. */
-const fakeSearch: SearchFn = async (query, metas) => {
+const fakeSearch: SearchFn = async (query, metas): Promise<SearchResult> => {
   if (query.kind !== "literal") throw new Error("fake supports literals");
   const needle = query.caseSensitive
     ? query.needle
@@ -88,11 +89,11 @@ const fakeSearch: SearchFn = async (query, metas) => {
       results.push({ session, matches, hitCount, capped: false });
     }
   }
-  return results;
+  return { matches: results, truncated: 0 };
 };
 
 interface Harness {
-  view: SessionSearchView;
+  view: ResumeSearchView;
   onSelect: ReturnType<typeof vi.fn>;
   onCancel: ReturnType<typeof vi.fn>;
   type(text: string): void;
@@ -100,7 +101,7 @@ interface Harness {
   settle(): Promise<void>;
 }
 
-const views: SessionSearchView[] = [];
+const views: ResumeSearchView[] = [];
 
 function createView(
   options: { initialQuery?: string; search?: SearchFn } = {},
@@ -116,7 +117,7 @@ function createView(
       pending--;
     }
   };
-  const view = new SessionSearchView({
+  const view = new ResumeSearchView({
     theme: plainTheme,
     keybindings: new KeybindingsManager(TUI_KEYBINDINGS),
     search,
@@ -164,16 +165,16 @@ describe("formatAge", () => {
   });
 });
 
-describe("SessionSearchView", () => {
+describe("ResumeSearchView", () => {
   it("shows loading, then lists every session for an empty query", () => {
     const h = createView();
     expect(h.text()).toContain("Loading…");
     expect(h.text()).toContain("Loading sessions…");
     h.view.setSessions(sessions());
     const rendered = h.text();
-    expect(rendered).toContain("Session Search (Current Folder)");
+    expect(rendered).toContain("Resume Session (Search)");
     expect(rendered).toContain("3 sessions");
-    expect(h.view.getResults().map((r) => r.session.path)).toEqual([
+    expect(h.view.getRows().map((r) => r.session.path)).toEqual([
       "/s/recent.jsonl",
       "/s/middle.jsonl",
       "/s/old.jsonl",
@@ -190,12 +191,12 @@ describe("SessionSearchView", () => {
     const h = createView({ initialQuery: "useeffect" });
     h.view.setSessions(sessions());
     await h.settle();
-    const results = h.view.getResults();
-    expect(results.map((r) => r.session.path)).toEqual([
+    const rows = h.view.getRows();
+    expect(rows.map((r) => r.session.path)).toEqual([
       "/s/recent.jsonl",
       "/s/old.jsonl",
     ]);
-    expect(results[0]?.hitCount).toBe(2);
+    expect(rows[0]?.match?.hitCount).toBe(2);
     const rendered = h.text();
     expect(rendered).toContain("2/3 sessions · 3 hits");
     expect(rendered).toMatch(/› Named session\s+2 hits\s+1m/);
@@ -218,23 +219,23 @@ describe("SessionSearchView", () => {
   it("narrows results while typing and resets the selection", async () => {
     const h = createView();
     h.view.setSessions(sessions());
-    expect(h.view.getResults()).toHaveLength(3);
+    expect(h.view.getRows()).toHaveLength(3);
     h.type("use");
     await h.settle();
-    expect(h.view.getResults()).toHaveLength(3);
+    expect(h.view.getRows()).toHaveLength(3);
     h.view.handleInput(KEY_DOWN);
     h.view.handleInput(KEY_DOWN);
     expect(h.view.getSelectedSessionPath()).toBe("/s/old.jsonl");
     h.type("Effect");
     await h.settle();
-    expect(h.view.getResults().map((r) => r.session.path)).toEqual([
+    expect(h.view.getRows().map((r) => r.session.path)).toEqual([
       "/s/recent.jsonl",
       "/s/old.jsonl",
     ]);
     expect(h.view.getSelectedSessionPath()).toBe("/s/recent.jsonl");
     h.type("zzz");
     await h.settle();
-    expect(h.view.getResults()).toHaveLength(0);
+    expect(h.view.getRows()).toHaveLength(0);
     expect(h.text()).toContain("No matches");
   });
 
@@ -280,7 +281,7 @@ describe("SessionSearchView", () => {
     h.type("Effect");
     release?.();
     await h.settle();
-    expect(h.view.getResults()).toHaveLength(2);
+    expect(h.view.getRows()).toHaveLength(2);
   });
 
   it("explains search failures", async () => {
@@ -293,18 +294,42 @@ describe("SessionSearchView", () => {
     const regex = createView({ search: failing, initialQuery: "re:(" });
     regex.view.setSessions(sessions());
     await regex.settle();
-    expect(regex.text()).toContain("Invalid regex: unclosed group");
-    expect(regex.view.getResults()).toHaveLength(0);
+    expect(regex.text()).toContain("Invalid pattern: unclosed group");
+    expect(regex.view.getRows()).toHaveLength(0);
     const literal = createView({ search: failing, initialQuery: "x" });
     literal.view.setSessions(sessions());
     await literal.settle();
     expect(literal.text()).toContain("ripgrep (rg) is not installed");
   });
 
-  it("surfaces listing failures", () => {
+  it("marks truncated sessions and warns once in the header", async () => {
+    const truncating: SearchFn = async (query, metas) => {
+      const base = await fakeSearch(query, metas, new AbortController().signal);
+      return {
+        matches: base.matches.map((match) => ({
+          ...match,
+          capped: true,
+          hitCount: 200,
+        })),
+        truncated: 3,
+      };
+    };
+    const h = createView({ search: truncating, initialQuery: "useeffect" });
+    h.view.setSessions(sessions());
+    await h.settle();
+    const rendered = h.text();
+    expect(rendered).toContain("3 sessions hit the scan limit");
+    expect(rendered).toMatch(/200\+ hits/);
+    expect(rendered).toContain("400+ hits");
+  });
+
+  it("reports a missing ripgrep the same way on the listing path", () => {
     const h = createView();
-    h.view.setLoadError("Failed to list sessions: boom");
-    expect(h.text()).toContain("Failed to list sessions: boom");
+    h.view.setLoadError(new RipgrepUnavailableError("looked everywhere"));
+    const rendered = h.text();
+    expect(rendered).toContain("ripgrep (rg) is not installed");
+    expect(rendered).not.toContain("Loading…");
+    expect(rendered).not.toContain("Loading sessions…");
   });
 
   it("keeps rendered lines within the width", async () => {

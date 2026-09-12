@@ -1,8 +1,18 @@
 # pi-resume-search
 
-`/rs`: resume a [pi](https://github.com/earendil-works/pi) session by searching what was said in it, not just its first message.
+`/rs`: a `/resume` picker that shows you *where* a session matched.
 
-pi's `/resume` lists each session by its first user message. When the thing you remember was said halfway through a conversation, that list does not help. `/rs` opens the same kind of picker, searches user and assistant messages as you type, shows the matching lines for the selected session, and resumes the one you pick.
+pi's `/resume` already searches the full text of every session, but it only ever shows each session's first message, so a hit tells you nothing about why that session matched. `/rs` runs the search over the same sessions and shows the matching messages themselves, with the query highlighted and a hit count per session, then resumes the one you pick.
+
+The two commands differ in three ways:
+
+| | `/resume` | `/rs` |
+| --- | --- | --- |
+| What a row shows | first message only | first message, hit count, and the matching messages of the selected session |
+| Search text | `SessionManager.list()` loads every session's full transcript into `allMessagesText` and keeps it in memory | one ripgrep pass per query, nothing kept between queries |
+| Query syntax | fuzzy tokens, `"phrase"` for exact, `re:` as a JavaScript regex always case-insensitive | literal phrase by default, `re:` as a ripgrep regex, both case-sensitive only when the query has uppercase |
+
+`/rs` does not replace `/resume`: scope toggling, threaded sort, delete, and rename live there.
 
 ## Usage
 
@@ -19,15 +29,16 @@ pi's `/resume` lists each session by its first user message. When the thing you 
 
 ## What is searched
 
-- The same sessions `/resume` shows for the current folder: the project's session directory. With a custom `--session-dir`, sessions are filtered by the cwd in their header, as pi does.
+- The same sessions `/resume` shows for the current folder: the project's session directory. With a custom `--session-dir`, sessions are filtered by the cwd in their header, as pi does. Rows are ordered by the last user or assistant entry, the same key pi orders `/resume` by.
 - User and assistant message text only. Thinking blocks, tool calls, tool results, compaction summaries, and extension messages are never matched.
+- Every message in the file, including messages left on branches you navigated away from with `/fork` or `/tree`. Those can match and appear in the preview but will not be in the conversation after you resume. `/resume` searches them too.
 - Search is read-only. Session files are not modified and nothing is sent anywhere.
 
 There is no index and no cache. Every query runs [ripgrep](https://github.com/BurntSushi/ripgrep) over the session files, so results always reflect the files on disk and nothing stays resident between queries.
 
-Limits: at most 200 matching messages per session (shown as `N+ hits`) and 20 highlighted positions per message.
+Limits: at most 200 matching lines are examined per session. Sessions that hit that limit are marked `N+ hits` and the header says how many were affected, so incomplete results are never silent. Hit counts are exact within the examined window; only the highlighting is capped, at 20 positions per message.
 
-Regex notes: the first pass runs over the stored JSONL, where quotes, backslashes, and newlines are escaped, so a pattern that spans those characters may miss. Patterns use ripgrep's regex syntax, which has no lookaround or backreferences and cannot be made pathological.
+Regex notes: `re:` patterns use ripgrep's syntax, which has no lookaround or backreferences and cannot be made pathological. Unlike a literal query, a regex is first matched against the stored JSONL line, where quotes, backslashes, and newlines are escaped and thinking blocks and tool-call arguments are still present; matches outside the message text are then discarded. A pattern that spans an escaped character may miss.
 
 ## Requirements
 
@@ -40,13 +51,13 @@ Measured on a project with 290 sessions totalling 426 MB of JSONL, files already
 
 | Action | Time |
 | --- | --- |
-| Open the picker (list 290 sessions) | ~160 ms |
+| Open the picker (list 290 sessions) | ~290 ms |
 | `useEffect` (19 sessions, 40 hits) | ~120 ms |
-| `数据库` (114 sessions, 487 hits) | ~130 ms |
-| `the` (195 sessions, 4517 hits) | ~340 ms |
-| `re:use(Effect\|State)` | ~160 ms |
+| `数据库` (114 sessions, 548 hits) | ~130 ms |
+| `the` (196 sessions, 7095 hits) | ~175 ms |
+| `re:use(Effect\|State)` | ~175 ms |
 
-A small project costs about 45 ms per query, almost all of it process start-up. The first query after a reboot is bound by disk speed.
+A small project costs about 60 ms per query, almost all of it process start-up. The first query after a reboot is bound by disk speed.
 
 ## Install
 

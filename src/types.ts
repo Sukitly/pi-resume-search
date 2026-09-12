@@ -16,7 +16,10 @@ export interface SessionMeta {
   name?: string;
   /** First user message, bounded; the row title when there is no name. */
   title: string;
-  /** File mtime in unix milliseconds. */
+  /**
+   * Unix milliseconds of the last user or assistant entry, falling back to
+   * the header timestamp and then the file mtime, as pi's listing does.
+   */
   modified: number;
 }
 
@@ -36,8 +39,8 @@ export interface DocumentMatch {
 export interface SessionMatch {
   session: SessionMeta;
   matches: DocumentMatch[];
-  /** Total match ranges across all matched documents. */
+  /** Occurrences across all matched messages. Not capped by range storage. */
   hitCount: number;
-  /** True when the per-file line cap stopped counting early. */
+  /** True when the scan window filled up, so these results are incomplete. */
   capped: boolean;
 }

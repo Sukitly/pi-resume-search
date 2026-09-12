@@ -47,31 +47,46 @@ export function jsonEscapeText(text: string): string {
   return JSON.stringify(text).slice(1, -1);
 }
 
-/**
- * Restricts the file pass to user and assistant message lines. Tool results,
- * compaction entries, and custom messages never reach the JSON parser.
- */
-const MESSAGE_LINE_PREFIX =
-  '^\\{"type":"message".*"message":\\{"role":"(?:user|assistant)".*';
+/** A user or assistant message entry. pi always writes content after role. */
+const MESSAGE_ROLE_PREFIX =
+  '^\\{"type":"message".*"message":\\{"role":"(?:user|assistant)"';
+/** Body of a JSON string, stopping before its closing quote. */
+const IN_JSON_STRING = '(?:[^"\\\\]|\\\\.)*';
 
 /**
- * Pattern for the file pass, which runs over raw JSONL. A literal needle is
- * JSON-escaped first so quotes, backslashes, and newlines match how pi
- * stores them. A regex runs against the stored form as written.
+ * Pattern for the file pass, which runs over raw JSONL.
+ *
+ * A literal needle is JSON-escaped so quotes, backslashes, and newlines match
+ * how pi stores them, and is anchored inside the message's own text: either
+ * a string `content` or a `{"type":"text"}` block. Without that anchor a hit
+ * in a thinking block or in tool-call arguments would produce a candidate
+ * line that the verification pass discards, wasting the per-file scan window
+ * and hiding real matches behind it.
+ *
+ * A regex cannot be anchored that way, because the user's pattern may carry
+ * its own anchors and alternations. Regex queries therefore match anywhere on
+ * the line and rely on verification to drop what is not message text.
  */
 export function buildLinePattern(
   query: Exclude<ParsedQuery, { kind: "empty" }>,
 ): string {
-  const body =
-    query.kind === "literal"
-      ? escapeRipgrepRegex(jsonEscapeText(query.needle))
-      : `(?:${query.source})`;
-  return MESSAGE_LINE_PREFIX + body;
+  if (query.kind === "regex") {
+    return `${MESSAGE_ROLE_PREFIX}.*(?:${query.source})`;
+  }
+  const needle = escapeRipgrepRegex(jsonEscapeText(query.needle));
+  return (
+    `${MESSAGE_ROLE_PREFIX},"content":` +
+    `(?:"${IN_JSON_STRING}${needle}` +
+    `|\\[.*\\{"type":"text","text":"${IN_JSON_STRING}${needle})`
+  );
 }
 
-/** Matching lines kept per file before ripgrep stops early. */
-export const MAX_LINES_PER_FILE = 200;
-/** Ranges kept per message. */
+/**
+ * Matching lines examined per file. Sessions with more are reported as
+ * truncated instead of being silently cut short.
+ */
+export const LINE_SCAN_CAP = 200;
+/** Highlighted positions kept per message; hit counts are not capped. */
 export const MAX_RANGES_PER_DOCUMENT = 20;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -129,9 +144,18 @@ export function byteRangesToCharRanges(
   return result;
 }
 
-export interface SearchOptions extends RipgrepOptions {
+export interface SearchOptions {
   /** Sessions in scope, in display order. Files outside it are ignored. */
   sessions: readonly SessionMeta[];
+  signal?: AbortSignal;
+  /** ripgrep executable override, for tests. */
+  ripgrepCommand?: string;
+}
+
+export interface SearchResult {
+  matches: SessionMatch[];
+  /** Sessions whose scan window filled up; their results are incomplete. */
+  truncated: number;
 }
 
 interface Candidate {
@@ -139,29 +163,45 @@ interface Candidate {
   document: SessionDocument;
 }
 
+/** Positions of a match plus the untruncated number of occurrences. */
+interface Hits {
+  ranges: MatchRange[];
+  total: number;
+}
+
 function escapeJsRegExp(text: string): string {
   return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-/** Positions of a literal needle; an escaped literal cannot backtrack. */
-export function literalRanges(
+/**
+ * Counts every occurrence of a literal needle but keeps only the first
+ * maxRanges positions. The `u` flag matters: ripgrep folds case per Unicode
+ * simple case folding, and a JavaScript regex only does the same with `u`.
+ * Without it a line ripgrep matched could yield no positions here and the
+ * message would be dropped. An escaped literal cannot backtrack.
+ */
+export function literalHits(
   text: string,
   needle: string,
   caseSensitive: boolean,
   maxRanges: number,
-): MatchRange[] {
+): Hits {
   const pattern = new RegExp(
     escapeJsRegExp(needle),
-    caseSensitive ? "g" : "gi",
+    caseSensitive ? "gu" : "giu",
   );
   const ranges: MatchRange[] = [];
+  let total = 0;
   let match = pattern.exec(text);
-  while (match !== null && ranges.length < maxRanges) {
+  while (match !== null) {
     if (match[0].length === 0) break;
-    ranges.push([match.index, match.index + match[0].length]);
+    total++;
+    if (ranges.length < maxRanges) {
+      ranges.push([match.index, match.index + match[0].length]);
+    }
     match = pattern.exec(text);
   }
-  return ranges;
+  return { ranges, total };
 }
 
 /**
@@ -169,18 +209,18 @@ export function literalRanges(
  * again through ripgrep over stdin, one document per line. Keeps user
  * patterns out of the JavaScript regex engine, which cannot be interrupted.
  */
-async function regexRanges(
+async function regexHits(
   texts: readonly string[],
   source: string,
   caseSensitive: boolean,
   options: RipgrepOptions,
-): Promise<Map<number, MatchRange[]>> {
+): Promise<Map<number, Hits>> {
   const input = texts.map((text) => text.replace(/[\r\n]/g, " ")).join("\n");
   const output = await runRipgrep(
     ["--json", ...(caseSensitive ? [] : ["--ignore-case"]), "-e", source],
     { ...options, input },
   );
-  const byIndex = new Map<number, MatchRange[]>();
+  const byIndex = new Map<number, Hits>();
   for (const match of parseRipgrepJson(output)) {
     const text = texts[match.lineNumber - 1];
     if (text === undefined) continue;
@@ -188,90 +228,114 @@ async function regexRanges(
       text,
       match.submatches.slice(0, MAX_RANGES_PER_DOCUMENT),
     );
-    if (ranges.length > 0) byIndex.set(match.lineNumber - 1, ranges);
+    if (ranges.length === 0) continue;
+    byIndex.set(match.lineNumber - 1, {
+      ranges,
+      total: match.submatches.length,
+    });
   }
   return byIndex;
 }
 
 /**
- * One ripgrep pass over the session files finds user/assistant lines that
- * contain the query; only those lines are JSON-parsed. Match positions in
- * the decoded text come from JavaScript for literal needles and from a
- * second ripgrep pass for regexes. Lines that only matched inside thinking
- * blocks or tool-call arguments end up with no positions and are dropped.
+ * One ripgrep pass over the session files finds candidate message lines;
+ * only those lines are JSON-parsed. Match positions in the decoded text come
+ * from JavaScript for literal needles and from a second ripgrep pass for
+ * regexes. Candidates whose decoded text does not contain the query, such as
+ * a regex that only matched a thinking block, produce no positions and are
+ * dropped.
  */
 export async function searchSessions(
   query: ParsedQuery,
   options: SearchOptions,
-): Promise<SessionMatch[]> {
-  if (query.kind === "empty" || options.sessions.length === 0) return [];
+): Promise<SearchResult> {
+  const empty: SearchResult = { matches: [], truncated: 0 };
+  if (query.kind === "empty" || options.sessions.length === 0) return empty;
+  const rg: RipgrepOptions = {
+    signal: options.signal,
+    command: options.ripgrepCommand,
+  };
   const output = await runRipgrepOverFiles(
     [
       "--with-filename",
       "--line-number",
       "--null",
+      // One extra line distinguishes "exactly at the cap" from "more".
       "--max-count",
-      String(MAX_LINES_PER_FILE),
+      String(LINE_SCAN_CAP + 1),
       ...(query.caseSensitive ? [] : ["--ignore-case"]),
       "-e",
       buildLinePattern(query),
     ],
     options.sessions.map((session) => session.path),
-    options,
+    rg,
   );
 
   const candidates: Candidate[] = [];
   const linesPerFile = new Map<string, number>();
   for (const record of parseRipgrepLines(output)) {
-    linesPerFile.set(record.path, (linesPerFile.get(record.path) ?? 0) + 1);
+    const seen = (linesPerFile.get(record.path) ?? 0) + 1;
+    linesPerFile.set(record.path, seen);
+    if (seen > LINE_SCAN_CAP) continue;
     const document = documentFromLine(record.text);
     if (document) candidates.push({ path: record.path, document });
   }
-  if (candidates.length === 0) return [];
+  const truncatedPaths = new Set(
+    [...linesPerFile]
+      .filter(([, seen]) => seen > LINE_SCAN_CAP)
+      .map(([path]) => path),
+  );
+  if (candidates.length === 0) {
+    return { matches: [], truncated: truncatedPaths.size };
+  }
 
-  let rangesByIndex: Map<number, MatchRange[]>;
+  let hitsByIndex: Map<number, Hits>;
   if (query.kind === "literal") {
-    rangesByIndex = new Map();
+    hitsByIndex = new Map();
     candidates.forEach((candidate, index) => {
-      const ranges = literalRanges(
+      const hits = literalHits(
         candidate.document.text,
         query.needle,
         query.caseSensitive,
         MAX_RANGES_PER_DOCUMENT,
       );
-      if (ranges.length > 0) rangesByIndex.set(index, ranges);
+      if (hits.ranges.length > 0) hitsByIndex.set(index, hits);
     });
   } else {
-    rangesByIndex = await regexRanges(
+    hitsByIndex = await regexHits(
       candidates.map((candidate) => candidate.document.text),
       query.source,
       query.caseSensitive,
-      options,
+      rg,
     );
   }
 
-  const byPath = new Map<string, DocumentMatch[]>();
-  for (const [index, ranges] of rangesByIndex) {
+  const byPath = new Map<string, { matches: DocumentMatch[]; hits: number }>();
+  for (const [index, hits] of hitsByIndex) {
     const candidate = candidates[index];
     if (!candidate) continue;
-    const list = byPath.get(candidate.path);
-    const documentMatch = { document: candidate.document, ranges };
-    if (list) list.push(documentMatch);
-    else byPath.set(candidate.path, [documentMatch]);
+    const entry = byPath.get(candidate.path);
+    const match = { document: candidate.document, ranges: hits.ranges };
+    if (entry) {
+      entry.matches.push(match);
+      entry.hits += hits.total;
+    } else {
+      byPath.set(candidate.path, { matches: [match], hits: hits.total });
+    }
   }
 
-  const results: SessionMatch[] = [];
+  const matches: SessionMatch[] = [];
   for (const session of options.sessions) {
-    const matches = byPath.get(session.path);
-    if (!matches) continue;
-    results.push({
+    const entry = byPath.get(session.path);
+    if (!entry) continue;
+    matches.push({
       session,
-      matches,
-      hitCount: matches.reduce((sum, match) => sum + match.ranges.length, 0),
-      capped: (linesPerFile.get(session.path) ?? 0) >= MAX_LINES_PER_FILE,
+      matches: entry.matches,
+      hitCount: entry.hits,
+      capped: truncatedPaths.has(session.path),
     });
   }
-  return results;
+  return { matches, truncated: truncatedPaths.size };
 }
 
 export interface Snippet {

@@ -15,6 +15,7 @@ import {
   type ParsedQuery,
   parseQuery,
   REGEX_PREFIX,
+  type SearchResult,
 } from "./search";
 import type { DocumentMatch, SessionMatch, SessionMeta } from "./types";
 
@@ -22,9 +23,18 @@ export type SearchFn = (
   query: ParsedQuery,
   sessions: readonly SessionMeta[],
   signal: AbortSignal,
-) => Promise<SessionMatch[]>;
+) => Promise<SearchResult>;
 
-export interface SessionSearchViewOptions {
+/**
+ * One list line. An empty query lists every session with no match attached,
+ * so `match` is absent rather than an empty SessionMatch.
+ */
+export interface Row {
+  session: SessionMeta;
+  match?: SessionMatch;
+}
+
+export interface ResumeSearchViewOptions {
   theme: Theme;
   keybindings: KeybindingsManager;
   search: SearchFn;
@@ -78,13 +88,13 @@ function alignRight(text: string, columns: number): string {
 type Notice = { color: "muted" | "warning" | "error"; text: string };
 
 /**
- * Editor replacement shown by /rs. Layout follows pi's session
- * selector: header, hints, query input, a fixed-height list of sessions, and
- * a preview of the selected session's matching messages. Every query runs
- * ripgrep through the injected search function; an empty query lists every
- * session. Nothing is cached beyond the current results.
+ * Editor replacement shown by /rs. Layout follows pi's session selector:
+ * header, hints, query input, a fixed-height list of sessions, and a preview
+ * of the selected session's matching messages. Every query runs ripgrep
+ * through the injected search function; an empty query lists every session.
+ * Nothing is cached beyond the current rows.
  */
-export class SessionSearchView implements Component, Focusable {
+export class ResumeSearchView implements Component, Focusable {
   private readonly theme: Theme;
   private readonly keybindings: KeybindingsManager;
   private readonly search: SearchFn;
@@ -100,7 +110,8 @@ export class SessionSearchView implements Component, Focusable {
   private sessions: SessionMeta[] | undefined;
   private loadError: string | undefined;
   private parsed: ParsedQuery = { kind: "empty" };
-  private results: SessionMatch[] = [];
+  private rows: Row[] = [];
+  private truncated = 0;
   private selectedIndex = 0;
   private searchError: string | undefined;
   private searching = false;
@@ -112,7 +123,7 @@ export class SessionSearchView implements Component, Focusable {
 
   private _focused = false;
 
-  constructor(options: SessionSearchViewOptions) {
+  constructor(options: ResumeSearchViewOptions) {
     this.theme = options.theme;
     this.keybindings = options.keybindings;
     this.search = options.search;
@@ -146,8 +157,8 @@ export class SessionSearchView implements Component, Focusable {
     this.runSearch(true);
   }
 
-  setLoadError(message: string): void {
-    this.loadError = message;
+  setLoadError(error: unknown): void {
+    this.loadError = describeError(error);
     this.requestRender();
   }
 
@@ -155,13 +166,12 @@ export class SessionSearchView implements Component, Focusable {
     return this.input.getValue();
   }
 
-  /** Current rows: matches for a query, or every session for an empty one. */
-  getResults(): readonly SessionMatch[] {
-    return this.results;
+  getRows(): readonly Row[] {
+    return this.rows;
   }
 
   getSelectedSessionPath(): string | undefined {
-    return this.results[this.selectedIndex]?.session.path;
+    return this.rows[this.selectedIndex]?.session.path;
   }
 
   invalidate(): void {
@@ -226,20 +236,25 @@ export class SessionSearchView implements Component, Focusable {
 
   private renderHeader(width: number): string[] {
     const theme = this.theme;
-    const title = theme.bold("Session Search (Current Folder)");
+    const title = theme.bold("Resume Session (Search)");
     let right: string;
-    if (!this.sessions) {
+    if (this.loadError) {
+      right = theme.fg("error", "Unavailable");
+    } else if (!this.sessions) {
       right = theme.fg("accent", "Loading…");
     } else if (this.searching) {
       right = theme.fg("accent", "Searching…");
     } else if (this.parsed.kind === "empty") {
       right = theme.fg("muted", `${this.sessions.length} sessions`);
     } else {
-      const hits = this.results.reduce((sum, r) => sum + r.hitCount, 0);
-      const plus = this.results.some((r) => r.capped) ? "+" : "";
+      const hits = this.rows.reduce(
+        (sum, row) => sum + (row.match?.hitCount ?? 0),
+        0,
+      );
+      const plus = this.rows.some((row) => row.match?.capped) ? "+" : "";
       right = theme.fg(
         "muted",
-        `${this.results.length}/${this.sessions.length} sessions · ${hits}${plus} hits`,
+        `${this.rows.length}/${this.sessions.length} sessions · ${hits}${plus} hits`,
       );
     }
     const rightText = truncateToWidth(right, width, "");
@@ -257,9 +272,14 @@ export class SessionSearchView implements Component, Focusable {
       sep +
       theme.fg("muted", "case-sensitive when the query has uppercase");
     const hint2 =
-      hint(this.keyLabel("tui.select.confirm"), "resume") +
-      sep +
-      hint(this.keyLabel("tui.select.cancel"), "cancel");
+      this.truncated > 0
+        ? theme.fg(
+            "warning",
+            `${this.truncated} ${this.truncated === 1 ? "session" : "sessions"} hit the scan limit; refine the query`,
+          )
+        : hint(this.keyLabel("tui.select.confirm"), "resume") +
+          sep +
+          hint(this.keyLabel("tui.select.cancel"), "cancel");
     return [
       `${left}${" ".repeat(spacing)}${rightText}`,
       truncateToWidth(hint1, width, "…"),
@@ -280,7 +300,7 @@ export class SessionSearchView implements Component, Focusable {
       ];
     }
     const lines: string[] = [];
-    const count = this.results.length;
+    const count = this.rows.length;
     const start = Math.max(
       0,
       Math.min(
@@ -291,11 +311,7 @@ export class SessionSearchView implements Component, Focusable {
     const end = Math.min(start + LIST_ROWS, count);
     for (let i = start; i < end; i++) {
       lines.push(
-        this.renderRow(
-          this.results[i] as SessionMatch,
-          i === this.selectedIndex,
-          width,
-        ),
+        this.renderRow(this.rows[i] as Row, i === this.selectedIndex, width),
       );
     }
     if (start > 0 || end < count) {
@@ -309,7 +325,7 @@ export class SessionSearchView implements Component, Focusable {
     if (this.loadError) return { color: "error", text: this.loadError };
     if (!this.sessions) return { color: "muted", text: "Loading sessions…" };
     if (this.searchError) return { color: "error", text: this.searchError };
-    if (this.results.length > 0) return undefined;
+    if (this.rows.length > 0) return undefined;
     if (this.searching) return { color: "muted", text: "Searching…" };
     if (this.parsed.kind === "empty") {
       return { color: "muted", text: "No sessions in current folder" };
@@ -317,19 +333,16 @@ export class SessionSearchView implements Component, Focusable {
     return { color: "muted", text: "No matches" };
   }
 
-  private renderRow(
-    result: SessionMatch,
-    selected: boolean,
-    width: number,
-  ): string {
+  private renderRow(row: Row, selected: boolean, width: number): string {
     const theme = this.theme;
-    const session = result.session;
+    const session = row.session;
     const isCurrent = this.currentSessionPath === session.path;
     const age = formatAge(this.now(), session.modified).padStart(3);
     let right = age;
-    if (this.parsed.kind !== "empty") {
-      const hits = `${result.hitCount}${result.capped ? "+" : ""}`.padStart(4);
-      right = `${hits} ${result.hitCount === 1 ? "hit " : "hits"}  ${age}`;
+    if (row.match) {
+      const { hitCount, capped } = row.match;
+      const hits = `${hitCount}${capped ? "+" : ""}`.padStart(4);
+      right = `${hits} ${hitCount === 1 ? "hit " : "hits"}  ${age}`;
     }
     const cursor = selected ? theme.fg("accent", "› ") : "  ";
     const availableForTitle = width - 2 - (visibleWidth(right) + 2);
@@ -354,8 +367,8 @@ export class SessionSearchView implements Component, Focusable {
   }
 
   private renderPreview(width: number): string[] {
-    if (this.parsed.kind === "empty" || this.listNotice()) return [];
-    const selected = this.results[this.selectedIndex];
+    if (this.listNotice()) return [];
+    const selected = this.rows[this.selectedIndex]?.match;
     if (!selected || selected.matches.length === 0) return [];
     const lines = selected.matches
       .slice(0, PREVIEW_SNIPPETS)
@@ -396,10 +409,10 @@ export class SessionSearchView implements Component, Focusable {
   }
 
   private moveSelection(delta: number): void {
-    if (this.results.length === 0) return;
+    if (this.rows.length === 0) return;
     this.selectedIndex = Math.max(
       0,
-      Math.min(this.results.length - 1, this.selectedIndex + delta),
+      Math.min(this.rows.length - 1, this.selectedIndex + delta),
     );
     this.requestRender();
   }
@@ -426,19 +439,15 @@ export class SessionSearchView implements Component, Focusable {
     this.generation++;
     this.searchError = undefined;
     this.searching = false;
+    this.truncated = 0;
     const sessions = this.sessions;
     if (!sessions) {
-      this.results = [];
+      this.rows = [];
       this.requestRender();
       return;
     }
     if (this.parsed.kind === "empty") {
-      this.results = sessions.map((session) => ({
-        session,
-        matches: [],
-        hitCount: 0,
-        capped: false,
-      }));
+      this.rows = sessions.map((session) => ({ session }));
       this.clampSelection();
       this.requestRender();
       return;
@@ -463,16 +472,20 @@ export class SessionSearchView implements Component, Focusable {
     this.searching = true;
     this.requestRender();
     this.search(query, sessions, controller.signal)
-      .then((results) => {
+      .then((result) => {
         if (generation !== this.generation) return;
-        this.results = results;
+        this.rows = result.matches.map((match) => ({
+          session: match.session,
+          match,
+        }));
+        this.truncated = result.truncated;
         this.clampSelection();
       })
       .catch((error: unknown) => {
         if (generation !== this.generation) return;
-        this.results = [];
+        this.rows = [];
         this.selectedIndex = 0;
-        this.searchError = describeSearchError(error, query);
+        this.searchError = describeError(error);
       })
       .finally(() => {
         if (generation !== this.generation) return;
@@ -485,17 +498,18 @@ export class SessionSearchView implements Component, Focusable {
   private clampSelection(): void {
     this.selectedIndex = Math.max(
       0,
-      Math.min(this.selectedIndex, this.results.length - 1),
+      Math.min(this.selectedIndex, this.rows.length - 1),
     );
   }
 }
 
-function describeSearchError(error: unknown, query: ParsedQuery): string {
+/** Shared by the listing and search paths so both report rg the same way. */
+export function describeError(error: unknown): string {
   if (error instanceof RipgrepUnavailableError) {
     return "ripgrep (rg) is not installed or not on PATH";
   }
-  if (error instanceof RipgrepError && query.kind === "regex") {
-    return `Invalid regex: ${error.message}`;
+  if (error instanceof RipgrepError) {
+    return `Invalid pattern: ${error.message}`;
   }
   const message = error instanceof Error ? error.message : String(error);
   return `Search failed: ${message}`;
