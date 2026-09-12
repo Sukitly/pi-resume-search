@@ -39,6 +39,13 @@
 - Empty, malformed, or concurrently updated session files.
 - Cancellation and restoring the selected session through supported pi APIs.
 
+## Releasing
+
+- Publish with `bun run release` only. Do not run `npm version`, `npm publish`, or tag by hand.
+- Releases run from `main` with a clean tree that matches `origin/main`.
+- Never release unless asked. Use `--dry-run` to check the preflight.
+- Keep `files` in `package.json` limited to what the extension needs at runtime.
+
 ## Git
 
 - Never commit or push unless asked.

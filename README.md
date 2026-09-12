@@ -62,10 +62,17 @@ A small project costs about 60 ms per query, almost all of it process start-up. 
 ## Install
 
 ```sh
-pi install git:github.com/Sukitly/pi-resume-search
+pi install npm:pi-resume-search
 ```
 
-Or try it from a checkout without installing:
+From git, or from a local checkout:
+
+```sh
+pi install git:github.com/Sukitly/pi-resume-search
+pi install /path/to/pi-resume-search
+```
+
+Or try it without installing:
 
 ```sh
 pi -e .
@@ -83,6 +90,18 @@ bun run format    # apply Biome fixes
 ```
 
 Entry point: `extensions/pi-resume-search.ts`. Implementation in `src/`: `ripgrep.ts` (process handling and output parsing), `sessions.ts` (listing), `search.ts` (query parsing and the two search passes), `ui.ts` (the picker), `command.ts` (registration).
+
+## Release
+
+`bun run release` publishes to npm and pushes the matching `vX.Y.Z` tag. It runs from `main` only, requires a clean tree in sync with `origin/main`, an `npm login`, and it runs lint, tests, and `npm pack --dry-run` before touching anything.
+
+```sh
+bun run release -- patch --dry-run   # preflight only, changes nothing
+bun run release -- patch             # bump, tag, push, publish
+bun run release -- initial           # first publish: keep the current version
+```
+
+`initial` is rejected once the package exists on npm; `major`/`minor`/`patch` are rejected while it does not. If the push fails nothing is published; if the publish fails the tag is already pushed and the fix is `npm publish --access public`, never a second version bump.
 
 ## License
 
